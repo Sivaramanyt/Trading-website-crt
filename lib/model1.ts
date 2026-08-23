@@ -20,40 +20,46 @@ function thickBody(c: Candle): boolean {
   return body > 0 && body > upperWick && body > lowerWick;
 }
 
+function touchesKey(c: Candle, keyLow: number, keyHigh: number): boolean {
+  return c.low <= keyHigh && c.high >= keyLow;
+}
+
 /**
- * Model #1 implementation based only on the supplied CRT material.
+ * 15M execution confirmation after a 4H CRT has been validated at a key level.
  *
- * Bullish: an old low/key level is stabbed by a thick down-close candle,
- * followed by a close above that trigger candle.
- * Bearish: an old high/key level is stabbed by a thick up-close candle,
- * followed by a close below that trigger candle.
+ * The lower timeframe is only searched from the 4H CRT distribution candle
+ * forward, so older 15M patterns cannot create a signal for a newer 4H CRT.
  *
- * The trigger candle is required to have a body larger than both wicks,
- * matching the candle-selectivity rule supplied for this project.
+ * Bullish Model #1: a thick down-close candle attacks the bullish key zone,
+ * then the next candle closes above the trigger candle.
+ * Bearish Model #1: a thick up-close candle attacks the bearish key zone,
+ * then the next candle closes below the trigger candle.
  */
 export function detectModelOne(
   candles: Candle[],
-  keyLevel: number,
+  keyLow: number,
+  keyHigh: number,
   direction: "LONG" | "SHORT",
+  startTime = 0,
 ): ModelOneSetup | null {
-  const closed = candles.filter((c) => c.closed !== false);
-  if (closed.length < 2 || !Number.isFinite(keyLevel)) return null;
+  const closed = candles
+    .filter((c) => c.closed !== false && c.time >= startTime)
+    .sort((a, b) => a.time - b.time);
+  if (closed.length < 2 || !Number.isFinite(keyLow) || !Number.isFinite(keyHigh)) return null;
 
   for (let i = closed.length - 2; i >= 0; i--) {
     const trigger = closed[i];
     const confirm = closed[i + 1];
     if (!thickBody(trigger)) continue;
+    if (!touchesKey(trigger, keyLow, keyHigh)) continue;
 
     if (direction === "LONG") {
-      const downClose = trigger.close < trigger.open;
-      const stabbedLevel = trigger.low <= keyLevel;
-      if (!downClose || !stabbedLevel) continue;
-
+      if (trigger.close >= trigger.open) continue;
       const confirmed = confirm.close > trigger.high;
       return {
         direction,
         status: confirmed ? "CONFIRMED" : "FORMING",
-        keyLevel,
+        keyLevel: (keyLow + keyHigh) / 2,
         triggerHigh: trigger.high,
         triggerLow: trigger.low,
         entry: confirmed ? confirm.close : trigger.high,
@@ -61,20 +67,17 @@ export function detectModelOne(
         triggerTime: trigger.time,
         confirmationTime: confirm.time,
         reason: confirmed
-          ? "Model #1: a thick down-close candle stabbed the key low and the next candle closed above the trigger candle."
-          : "Model #1 forming: a thick down-close candle stabbed the key low; confirmation requires a close above the trigger candle.",
+          ? "15M Model #1 confirmed: a thick down-close candle mitigated the 4H key level and the next candle closed above the trigger candle."
+          : "15M Model #1 forming: a thick down-close candle mitigated the 4H key level; confirmation requires a close above the trigger candle.",
       };
     }
 
-    const upClose = trigger.close > trigger.open;
-    const stabbedLevel = trigger.high >= keyLevel;
-    if (!upClose || !stabbedLevel) continue;
-
+    if (trigger.close <= trigger.open) continue;
     const confirmed = confirm.close < trigger.low;
     return {
       direction,
       status: confirmed ? "CONFIRMED" : "FORMING",
-      keyLevel,
+      keyLevel: (keyLow + keyHigh) / 2,
       triggerHigh: trigger.high,
       triggerLow: trigger.low,
       entry: confirmed ? confirm.close : trigger.low,
@@ -82,8 +85,8 @@ export function detectModelOne(
       triggerTime: trigger.time,
       confirmationTime: confirm.time,
       reason: confirmed
-        ? "Model #1: a thick up-close candle stabbed the key high and the next candle closed below the trigger candle."
-        : "Model #1 forming: a thick up-close candle stabbed the key high; confirmation requires a close below the trigger candle.",
+        ? "15M Model #1 confirmed: a thick up-close candle mitigated the 4H key level and the next candle closed below the trigger candle."
+        : "15M Model #1 forming: a thick up-close candle mitigated the 4H key level; confirmation requires a close below the trigger candle.",
     };
   }
 
