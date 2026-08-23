@@ -35,31 +35,31 @@ export function detectMss(
 
   if (direction === "LONG") {
     for (let i = c.length - 1; i >= 3; i--) {
-      const p2 = i - 1, p1 = i - 2;
-      if (!pivotLow(c, p1) && !pivotLow(c, p2)) continue;
-      const lowIndex = pivotLow(c, p2) ? p2 : p1;
-      const priorHighCandidates = [] as number[];
+      const p1 = i - 2, p2 = i - 1;
+      const lowIndex = pivotLow(c, p2) ? p2 : pivotLow(c, p1) ? p1 : -1;
+      if (lowIndex < 0) continue;
+      const priorHighCandidates: number[] = [];
       for (let j = 1; j < lowIndex; j++) if (pivotHigh(c, j)) priorHighCandidates.push(j);
       if (!priorHighCandidates.length) continue;
       const highIndex = priorHighCandidates[priorHighCandidates.length - 1];
       if (c[lowIndex].low >= c[highIndex].low) continue;
-      const break = c[i];
-      if (break.close > c[highIndex].high) return { direction, status:"CONFIRMED", pivotLow:c[lowIndex].low, pivotHigh:c[highIndex].high, breakLevel:c[highIndex].high, breakTime:break.time, pivotTime:c[lowIndex].time, reason:"Bullish MSS: a low formed, price made a lower low, then a closed candle broke above the intervening swing high." };
-      if (i === c.length - 1 && break.high > c[highIndex].high) return { direction, status:"FORMING", pivotLow:c[lowIndex].low, pivotHigh:c[highIndex].high, breakLevel:c[highIndex].high, breakTime:break.time, pivotTime:c[lowIndex].time, reason:"Bullish MSS forming: price has attacked the intervening swing high but has not closed above it." };
+      const currentCandle = c[i];
+      if (currentCandle.close > c[highIndex].high) return { direction, status:"CONFIRMED", pivotLow:c[lowIndex].low, pivotHigh:c[highIndex].high, breakLevel:c[highIndex].high, breakTime:currentCandle.time, pivotTime:c[lowIndex].time, reason:"Bullish MSS: a low formed, price made a lower low, then a closed candle broke above the intervening swing high." };
+      if (i === c.length - 1 && currentCandle.high > c[highIndex].high) return { direction, status:"FORMING", pivotLow:c[lowIndex].low, pivotHigh:c[highIndex].high, breakLevel:c[highIndex].high, breakTime:currentCandle.time, pivotTime:c[lowIndex].time, reason:"Bullish MSS forming: price has attacked the intervening swing high but has not closed above it." };
     }
   } else {
     for (let i = c.length - 1; i >= 3; i--) {
       const p1 = i - 2, p2 = i - 1;
-      if (!pivotHigh(c, p1) && !pivotHigh(c, p2)) continue;
-      const highIndex = pivotHigh(c, p2) ? p2 : p1;
-      const priorLowCandidates = [] as number[];
+      const highIndex = pivotHigh(c, p2) ? p2 : pivotHigh(c, p1) ? p1 : -1;
+      if (highIndex < 0) continue;
+      const priorLowCandidates: number[] = [];
       for (let j = 1; j < highIndex; j++) if (pivotLow(c, j)) priorLowCandidates.push(j);
       if (!priorLowCandidates.length) continue;
       const lowIndex = priorLowCandidates[priorLowCandidates.length - 1];
       if (c[highIndex].high <= c[lowIndex].high) continue;
-      const break = c[i];
-      if (break.close < c[lowIndex].low) return { direction, status:"CONFIRMED", pivotLow:c[lowIndex].low, pivotHigh:c[highIndex].high, breakLevel:c[lowIndex].low, breakTime:break.time, pivotTime:c[highIndex].time, reason:"Bearish MSS: a high formed, price made a higher high, then a closed candle broke below the intervening swing low." };
-      if (i === c.length - 1 && break.low < c[lowIndex].low) return { direction, status:"FORMING", pivotLow:c[lowIndex].low, pivotHigh:c[highIndex].high, breakLevel:c[lowIndex].low, breakTime:break.time, pivotTime:c[highIndex].time, reason:"Bearish MSS forming: price has attacked the intervening swing low but has not closed below it." };
+      const currentCandle = c[i];
+      if (currentCandle.close < c[lowIndex].low) return { direction, status:"CONFIRMED", pivotLow:c[lowIndex].low, pivotHigh:c[highIndex].high, breakLevel:c[lowIndex].low, breakTime:currentCandle.time, pivotTime:c[highIndex].time, reason:"Bearish MSS: a high formed, price made a higher high, then a closed candle broke below the intervening swing low." };
+      if (i === c.length - 1 && currentCandle.low < c[lowIndex].low) return { direction, status:"FORMING", pivotLow:c[lowIndex].low, pivotHigh:c[highIndex].high, breakLevel:c[lowIndex].low, breakTime:currentCandle.time, pivotTime:c[highIndex].time, reason:"Bearish MSS forming: price has attacked the intervening swing low but has not closed below it." };
     }
   }
   return null;
