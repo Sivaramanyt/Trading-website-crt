@@ -26,6 +26,8 @@ export default function TradingTerminal() {
   const wsRef = useRef<WebSocket | null>(null);
   const tradeWsRef = useRef<WebSocket | null>(null);
   const reconnectRef = useRef<number | null>(null);
+  const viewInitializedRef = useRef(false);
+  const viewResetKeyRef = useRef("");
   const [symbol, setSymbol] = useState("BTCUSDT");
   const [timeframe, setTimeframe] = useState<ChartTimeframe>("15m");
   const [candles, setCandles] = useState<Candle[]>([]);
@@ -53,8 +55,6 @@ export default function TradingTerminal() {
     } finally { setLoading(false); }
   }, []);
 
-  // Full history/HTF refresh once a minute. The faster sync below keeps the
-  // active candle caught up for whichever timeframe is currently displayed.
   useEffect(() => {
     void load(symbol, timeframe);
     const id = window.setInterval(() => void load(symbol, timeframe), 60_000);
@@ -63,22 +63,17 @@ export default function TradingTerminal() {
 
   useEffect(() => {
     let cancelled = false;
-
     const syncLatest = async () => {
       try {
         const latest = await getLatestKlines(symbol, timeframe);
         if (!cancelled && latest.length) {
           setCandles(old => latest.reduce(mergeCandle, old));
-          // Keep the quote sourced from the Futures last-trade stream/endpoint;
-          // the candle close is not used as the live quote here.
-          if (timeframe === "15m") setPrice(latest[latest.length - 1].close);
           setError("");
         }
       } catch {
         // WebSocket remains the primary live path; REST is only a catch-up path.
       }
     };
-
     void syncLatest();
     const id = window.setInterval(() => void syncLatest(), 5_000);
     return () => { cancelled = true; window.clearInterval(id); };
@@ -108,12 +103,8 @@ export default function TradingTerminal() {
           if (!Number.isFinite(openTime)) return;
           const c: Candle = {
             time: Math.floor(openTime / 1000),
-            open: Number(k.o),
-            high: Number(k.h),
-            low: Number(k.l),
-            close: Number(k.c),
-            volume: Number(k.v),
-            closed: Boolean(k.x),
+            open: Number(k.o), high: Number(k.h), low: Number(k.l), close: Number(k.c),
+            volume: Number(k.v), closed: Boolean(k.x),
           };
           setCandles(old => mergeCandle(old, c));
         } catch {
@@ -128,8 +119,6 @@ export default function TradingTerminal() {
         reconnectRef.current = window.setTimeout(connect, delay);
       };
 
-      // The quote stream is independent from the selected chart timeframe.
-      // It keeps the displayed last-trade price responsive on both 15m and 4h.
       const tradeWs = new WebSocket(`wss://fstream.binance.com/ws/${symbol.toLowerCase()}@aggTrade`);
       tradeWsRef.current = tradeWs;
       tradeWs.onmessage = e => {
@@ -182,11 +171,20 @@ export default function TradingTerminal() {
     return () => { ro.disconnect(); chart.remove(); chartRef.current = null; candleRef.current = null; };
   }, []);
 
+  // Only fit the chart when the symbol/timeframe changes or the first history
+  // arrives. Do NOT call fitContent on every live candle update: that resets
+  // the user's manual zoom/pan and was the cause of the chart zooming back out.
   useEffect(() => {
-    if (!candleRef.current || !candles.length) return;
+    if (!candleRef.current || !candles.length || !chartRef.current) return;
     candleRef.current.setData(candles.map(c => ({ time: chartTime(c.time), open: c.open, high: c.high, low: c.low, close: c.close })));
-    chartRef.current?.timeScale().fitContent();
-  }, [candles]);
+
+    const viewKey = `${symbol}:${timeframe}`;
+    if (!viewInitializedRef.current || viewResetKeyRef.current !== viewKey) {
+      chartRef.current.timeScale().fitContent();
+      viewInitializedRef.current = true;
+      viewResetKeyRef.current = viewKey;
+    }
+  }, [candles, symbol, timeframe]);
 
   useEffect(() => {
     const chart = chartRef.current; if (!chart || !candles.length) return;
