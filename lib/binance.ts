@@ -9,26 +9,40 @@ export type Candle = {
 };
 
 // Binance USDⓈ-M Futures public market-data API.
-// This is market data only; no API key is required for these public endpoints.
-const DATA_API = "https://fapi.binance.com";
+// Public klines do not require a Binance API key.
+const DATA_API_HOSTS = [
+  "https://fapi.binance.com",
+  "https://fapi1.binance.com",
+  "https://fapi2.binance.com",
+  "https://fapi3.binance.com",
+];
 
-export async function getKlines(symbol: string, interval: string, limit = 500): Promise<Candle[]> {
+type BinanceKline = [
+  number,
+  string,
+  string,
+  string,
+  string,
+  string,
+  number,
+  string,
+  number,
+  string,
+  string,
+  string,
+];
+
+function makeUrl(host: string, symbol: string, interval: string, limit: number) {
   const params = new URLSearchParams({
     symbol: symbol.toUpperCase(),
     interval,
     limit: String(Math.min(Math.max(limit, 1), 1000)),
   });
+  return `${host}/fapi/v1/klines?${params.toString()}`;
+}
 
-  const response = await fetch(`${DATA_API}/fapi/v1/klines?${params.toString()}`, {
-    cache: "no-store",
-  });
-  if (!response.ok) throw new Error(`Binance Futures returned ${response.status}`);
-
-  const rows = (await response.json()) as Array<[
-    number, string, string, string, string, string, number, string, number, string, string, string
-  ]>;
+function parseRows(rows: BinanceKline[]): Candle[] {
   const now = Date.now();
-
   return rows.map((row) => ({
     time: Math.floor(row[0] / 1000),
     open: Number(row[1]),
@@ -38,4 +52,37 @@ export async function getKlines(symbol: string, interval: string, limit = 500): 
     volume: Number(row[5]),
     closed: row[6] <= now,
   }));
+}
+
+/**
+ * Public Futures klines. In the browser we try Binance directly first so a
+ * Vercel server region cannot block market-data requests. The Next.js API
+ * route remains as a fallback and for server-side use.
+ */
+export async function getKlines(symbol: string, interval: string, limit = 500): Promise<Candle[]> {
+  const errors: string[] = [];
+  const hosts = typeof window === "undefined" ? DATA_API_HOSTS : DATA_API_HOSTS;
+
+  for (const host of hosts) {
+    try {
+      const response = await fetch(makeUrl(host, symbol, interval, limit), {
+        cache: "no-store",
+        headers: { Accept: "application/json" },
+      });
+      if (!response.ok) {
+        errors.push(`${host}: HTTP ${response.status}`);
+        continue;
+      }
+      const rows = (await response.json()) as BinanceKline[];
+      if (!Array.isArray(rows) || rows.length === 0) {
+        errors.push(`${host}: empty response`);
+        continue;
+      }
+      return parseRows(rows);
+    } catch (error) {
+      errors.push(`${host}: ${error instanceof Error ? error.message : "network error"}`);
+    }
+  }
+
+  throw new Error(`Binance Futures market data unavailable. ${errors.join(" | ")}`);
 }
