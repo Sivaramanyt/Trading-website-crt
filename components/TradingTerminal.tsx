@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { CandlestickSeries, ColorType, createChart, LineSeries, type IChartApi, type ISeriesApi, type Time } from "lightweight-charts";
-import type { Candle } from "@/lib/binance";
+import { getKlines, type Candle } from "@/lib/binance";
 import { detectCrt, formatPrice, type CrtSetup } from "@/lib/crt";
 
 const SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT"];
@@ -28,15 +28,20 @@ export default function TradingTerminal() {
   const load = useCallback(async (s: string) => {
     setLoading(true); setError("");
     try {
-      const [ltfRes, htfRes] = await Promise.all([
-        fetch(`/api/klines?symbol=${s}&interval=15m&limit=500`, { cache: "no-store" }),
-        fetch(`/api/klines?symbol=${s}&interval=4h&limit=200`, { cache: "no-store" }),
+      // Load public Futures candles directly in the browser. This avoids a
+      // Vercel server-region restriction on Binance Futures REST endpoints.
+      const [ltf, htf] = await Promise.all([
+        getKlines(s, "15m", 500),
+        getKlines(s, "4h", 200),
       ]);
-      if (!ltfRes.ok || !htfRes.ok) throw new Error("Binance Futures market data could not be loaded.");
-      const [ltf, htf] = await Promise.all([ltfRes.json() as Promise<Candle[]>, htfRes.json() as Promise<Candle[]>]);
-      setCandles(ltf); setPrice(ltf.at(-1)?.close ?? null); setCrt(detectCrt(htf));
+      if (!ltf.length || !htf.length) throw new Error("Binance Futures returned no candles.");
+      setCandles(ltf);
+      setPrice(ltf.at(-1)?.close ?? null);
+      setCrt(detectCrt(htf));
+      setError("");
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Unable to load Binance Futures market data."); setStatus("offline");
+      setError(e instanceof Error ? e.message : "Unable to load Binance Futures market data.");
+      setStatus("offline");
     } finally { setLoading(false); }
   }, []);
 
