@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { CandlestickSeries, ColorType, createChart, LineSeries, type IChartApi, type ISeriesApi, type Time } from "lightweight-charts";
 import { getKlines, getLatestKlines, getLastPrice, type Candle } from "@/lib/binance";
 import { detectCrt, formatPrice, type CrtSetup } from "@/lib/crt";
+import { detectModelOne, type ModelOneSetup } from "@/lib/model1";
 
 const SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT"];
 type ChartTimeframe = "15m" | "4h";
@@ -32,6 +33,7 @@ export default function TradingTerminal() {
   const [timeframe, setTimeframe] = useState<ChartTimeframe>("15m");
   const [candles, setCandles] = useState<Candle[]>([]);
   const [crt, setCrt] = useState<CrtSetup | null>(null);
+  const [model1, setModel1] = useState<ModelOneSetup | null>(null);
   const [price, setPrice] = useState<number | null>(null);
   const [status, setStatus] = useState<"connecting" | "live" | "offline">("connecting");
   const [loading, setLoading] = useState(true);
@@ -40,15 +42,18 @@ export default function TradingTerminal() {
   const load = useCallback(async (s: string, tf: ChartTimeframe) => {
     setLoading(true); setError("");
     try {
-      const [chartCandles, htf, lastPrice] = await Promise.all([
+      const [chartCandles, htf, ltf, lastPrice] = await Promise.all([
         getKlines(s, tf, tf === "15m" ? 500 : 200),
         getKlines(s, "4h", 200),
+        getKlines(s, "15m", 500),
         getLastPrice(s),
       ]);
-      if (!chartCandles.length || !htf.length) throw new Error("Binance Futures returned no candles.");
+      if (!chartCandles.length || !htf.length || !ltf.length) throw new Error("Binance Futures returned no candles.");
       setCandles(chartCandles);
       setPrice(lastPrice);
-      setCrt(detectCrt(htf));
+      const setup = detectCrt(htf);
+      setCrt(setup);
+      setModel1(setup ? detectModelOne(ltf, setup.direction === "LONG" ? setup.rangeLow : setup.rangeHigh, setup.direction) : null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Unable to load Binance Futures market data.");
       setStatus("offline");
@@ -171,9 +176,8 @@ export default function TradingTerminal() {
     return () => { ro.disconnect(); chart.remove(); chartRef.current = null; candleRef.current = null; };
   }, []);
 
-  // Only fit the chart when the symbol/timeframe changes or the first history
-  // arrives. Do NOT call fitContent on every live candle update: that resets
-  // the user's manual zoom/pan and was the cause of the chart zooming back out.
+  // Only fit the chart when the symbol/timeframe changes or the first history arrives.
+  // Live candle updates preserve manual zoom/pan.
   useEffect(() => {
     if (!candleRef.current || !candles.length || !chartRef.current) return;
     candleRef.current.setData(candles.map(c => ({ time: chartTime(c.time), open: c.open, high: c.high, low: c.low, close: c.close })));
@@ -197,7 +201,15 @@ export default function TradingTerminal() {
       line.setData(horizontalData(candles, crt.rangeTime, value));
       holder.crtLines.push(line);
     }
-  }, [candles, crt, timeframe]);
+    if (model1 && timeframe === "15m") {
+      const modelLevels = [[model1.keyLevel, "#a78bfa", "MODEL 1 KEY"], [model1.triggerHigh, "#f59e0b", "M1 HIGH"], [model1.triggerLow, "#f59e0b", "M1 LOW"]] as const;
+      for (const [value, color, title] of modelLevels) {
+        const line = chart.addSeries(LineSeries, { color, lineWidth: 1, lineStyle: 2, title, priceLineVisible: false, lastValueVisible: true });
+        line.setData(horizontalData(candles, model1.triggerTime, value));
+        holder.crtLines.push(line);
+      }
+    }
+  }, [candles, crt, model1, timeframe]);
 
   return <main className="terminal-shell">
     <header className="topbar">
@@ -209,7 +221,7 @@ export default function TradingTerminal() {
     <section className="workspace">
       <div className="chart-card"><div className="chart-toolbar"><div><span className="toolbar-title">Futures price action</span><span className="toolbar-muted">{timeframe === "15m" ? "15 minute execution chart" : "4 hour higher-timeframe chart"} · USDⓈ-M perpetual market</span></div><div className="toolbar-badges"><span className="badge">HTF: 4H</span><span className="badge">LTF: 15M</span><span className="badge live-badge">LIVE</span></div></div><div className="chart-wrap">{loading && <div className="chart-overlay">Loading Binance Futures {timeframe} candles…</div>}<div ref={rootRef} className="chart" /></div></div>
       <aside className="side-panel"><div className="panel-header"><div><div className="eyebrow">CRT ANALYSIS</div><h2>{crt ? `${crt.direction} SETUP` : "WAITING"}</h2></div><span className={`signal-pill ${crt?.direction?.toLowerCase() ?? "neutral"}`}>{crt?.status ?? "NO SETUP"}</span></div>
-        {crt ? <><div className="setup-banner"><div className="setup-icon">{crt.direction === "LONG" ? "↗" : "↘"}</div><div><strong>{crt.direction === "LONG" ? "Bullish CRT" : "Bearish CRT"}</strong><p>{crt.reason}</p></div></div><div className="levels"><Level label="Entry" value={crt.entry}/><Level label="Stop Loss" value={crt.stop} danger/><Level label="Target 1 · 50%" value={crt.target1}/><Level label="Target 2 · CRT edge" value={crt.target2}/></div><div className="range-card"><div className="range-title">4H CRT RANGE</div><div className="range-row"><span>High</span><b>{formatPrice(crt.rangeHigh)}</b></div><div className="range-mid"><span>50%</span><b>{formatPrice(crt.midpoint)}</b></div><div className="range-row"><span>Low</span><b>{formatPrice(crt.rangeLow)}</b></div></div><div className="disclaimer"><b>Strategy engine v0.1</b><span>Core Candle 1 → sweep → Candle 3 return model is automated. Key-level quality, SMT and full Model #1 confirmation are not auto-approved yet.</span></div></> : <div className="empty-state"><div className="empty-icon">⌁</div><h3>No confirmed CRT</h3><p>The latest closed 4H candles do not currently match the foundational sweep-and-return pattern.</p></div>}
+        {crt ? <><div className="setup-banner"><div className="setup-icon">{crt.direction === "LONG" ? "↗" : "↘"}</div><div><strong>{crt.direction === "LONG" ? "Bullish CRT" : "Bearish CRT"}</strong><p>{crt.reason}</p></div></div><div className="levels"><Level label="Entry" value={crt.entry}/><Level label="Stop Loss" value={crt.stop} danger/><Level label="Target 1 · 50%" value={crt.target1}/><Level label="Target 2 · CRT edge" value={crt.target2}/></div><div className="range-card"><div className="range-title">4H CRT RANGE</div><div className="range-row"><span>High</span><b>{formatPrice(crt.rangeHigh)}</b></div><div className="range-mid"><span>50%</span><b>{formatPrice(crt.midpoint)}</b></div><div className="range-row"><span>Low</span><b>{formatPrice(crt.rangeLow)}</b></div></div><div className="model-card"><div className="range-title">15M MODEL #1</div><div className="model-status"><span className={`signal-pill ${model1 ? (model1.direction === "LONG" ? "long" : "short") : "neutral"}`}>{model1?.status ?? "NO CANDIDATE"}</span></div><p>{model1?.reason ?? "No source-qualified Model #1 candidate is currently detected at the provisional CRT boundary key level."}</p>{model1 && <div className="levels"><Level label="Key Level" value={model1.keyLevel}/><Level label="M1 Entry" value={model1.entry}/><Level label="M1 Stop" value={model1.stop} danger/></div>}</div><div className="disclaimer"><b>Strategy engine v0.2</b><span>4H CRT + 15M Model #1 are automated from the supplied transcript rules. Key-level quality beyond the CRT boundary and other discretionary confirmations are not silently guessed.</span></div></> : <div className="empty-state"><div className="empty-icon">⌁</div><h3>No confirmed CRT</h3><p>The latest closed 4H candles do not currently match the foundational sweep-and-return pattern.</p></div>}
       </aside>
     </section>
     {error && <div className="error-bar">{error}</div>}
