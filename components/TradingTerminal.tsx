@@ -12,6 +12,12 @@ function horizontalData(candles: Candle[], from: number, value: number) {
   return candles.filter(c => c.time >= from).map(c => ({ time: chartTime(c.time), value }));
 }
 
+function mergeCandle(old: Candle[], next: Candle): Candle[] {
+  const map = new Map(old.map(c => [c.time, c]));
+  map.set(next.time, next);
+  return [...map.values()].sort((a, b) => a.time - b.time).slice(-600);
+}
+
 export default function TradingTerminal() {
   const rootRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -28,8 +34,9 @@ export default function TradingTerminal() {
   const load = useCallback(async (s: string) => {
     setLoading(true); setError("");
     try {
-      // Load public Futures candles directly in the browser. This avoids a
-      // Vercel server-region restriction on Binance Futures REST endpoints.
+      // Both series come from Binance USDⓈ-M Futures. The 15m series is the
+      // exact exchange kline used for the execution chart; the 4h series is
+      // used independently by the CRT engine.
       const [ltf, htf] = await Promise.all([
         getKlines(s, "15m", 500),
         getKlines(s, "4h", 200),
@@ -53,19 +60,37 @@ export default function TradingTerminal() {
 
   useEffect(() => {
     wsRef.current?.close(); setStatus("connecting");
-    // Binance USDⓈ-M Futures 15m kline stream.
+
+    // Binance USDⓈ-M Futures 15m kline stream. Its k.t field is the same
+    // exchange candle OPEN timestamp used by the REST klines above.
     const ws = new WebSocket(`wss://fstream.binance.com/ws/${symbol.toLowerCase()}@kline_15m`);
     wsRef.current = ws;
     ws.onopen = () => setStatus("live");
     ws.onmessage = e => {
       try {
-        const k = JSON.parse(e.data)?.k; if (!k) return;
-        const c: Candle = { time: Math.floor(Number(k.t) / 1000), open: +k.o, high: +k.h, low: +k.l, close: +k.c, volume: +k.v, closed: !!k.x };
+        const k = JSON.parse(e.data)?.k;
+        if (!k) return;
+        const openTime = Number(k.t);
+        if (!Number.isFinite(openTime)) return;
+
+        const c: Candle = {
+          time: Math.floor(openTime / 1000),
+          open: Number(k.o),
+          high: Number(k.h),
+          low: Number(k.l),
+          close: Number(k.c),
+          volume: Number(k.v),
+          closed: Boolean(k.x),
+        };
+
         setPrice(c.close);
-        setCandles(old => { const a = [...old]; const last = a.at(-1); if (last?.time === c.time) a[a.length - 1] = c; else a.push(c); return a.slice(-600); });
-      } catch { /* ignore malformed stream messages */ }
+        setCandles(old => mergeCandle(old, c));
+      } catch {
+        // Ignore malformed stream messages.
+      }
     };
-    ws.onerror = () => setStatus("offline"); ws.onclose = () => setStatus("offline");
+    ws.onerror = () => setStatus("offline");
+    ws.onclose = () => setStatus("offline");
     return () => { ws.close(); wsRef.current = null; };
   }, [symbol]);
 
@@ -75,19 +100,54 @@ export default function TradingTerminal() {
       layout: { background: { type: ColorType.Solid, color: "#080b12" }, textColor: "#8d98aa" },
       grid: { vertLines: { color: "#151b25" }, horzLines: { color: "#151b25" } },
       crosshair: { vertLine: { color: "#465064", labelBackgroundColor: "#1d2635" }, horzLine: { color: "#465064", labelBackgroundColor: "#1d2635" } },
-      rightPriceScale: { borderColor: "#202938" }, timeScale: { borderColor: "#202938", timeVisible: true, secondsVisible: false },
-      width: rootRef.current.clientWidth, height: 620,
+      rightPriceScale: { borderColor: "#202938" },
+      timeScale: {
+        borderColor: "#202938",
+        timeVisible: true,
+        secondsVisible: false,
+        rightOffset: 8,
+        barSpacing: 8,
+        minBarSpacing: 2,
+      },
+      width: rootRef.current.clientWidth,
+      height: 620,
     });
-    const series = chart.addSeries(CandlestickSeries, { upColor: "#19c37d", downColor: "#ef5b6b", borderUpColor: "#19c37d", borderDownColor: "#ef5b6b", wickUpColor: "#19c37d", wickDownColor: "#ef5b6b" });
-    chartRef.current = chart; candleRef.current = series;
-    const ro = new ResizeObserver(() => rootRef.current && chart.applyOptions({ width: rootRef.current.clientWidth }));
+
+    const series = chart.addSeries(CandlestickSeries, {
+      upColor: "#19c37d",
+      downColor: "#ef5b6b",
+      borderUpColor: "#19c37d",
+      borderDownColor: "#ef5b6b",
+      wickUpColor: "#19c37d",
+      wickDownColor: "#ef5b6b",
+    });
+
+    chartRef.current = chart;
+    candleRef.current = series;
+
+    const ro = new ResizeObserver(() => {
+      if (rootRef.current) chart.applyOptions({ width: rootRef.current.clientWidth });
+    });
     ro.observe(rootRef.current);
-    return () => { ro.disconnect(); chart.remove(); chartRef.current = null; candleRef.current = null; };
+
+    return () => {
+      ro.disconnect();
+      chart.remove();
+      chartRef.current = null;
+      candleRef.current = null;
+    };
   }, []);
 
   useEffect(() => {
     if (!candleRef.current || !candles.length) return;
-    candleRef.current.setData(candles.map(c => ({ time: chartTime(c.time), open: c.open, high: c.high, low: c.low, close: c.close })));
+    candleRef.current.setData(candles.map(c => ({
+      time: chartTime(c.time),
+      open: c.open,
+      high: c.high,
+      low: c.low,
+      close: c.close,
+    })));
+    chartRef.current?.timeScale().fitContent();
   }, [candles]);
 
   useEffect(() => {
@@ -98,7 +158,8 @@ export default function TradingTerminal() {
     const levels = [[crt.rangeHigh, "#55d6be", "CRT HIGH"], [crt.midpoint, "#f5c451", "50%"], [crt.rangeLow, "#55d6be", "CRT LOW"], [crt.entry, "#7c8cff", "ENTRY"], [crt.stop, "#ef5b6b", "SL"]] as const;
     for (const [value, color, title] of levels) {
       const line = chart.addSeries(LineSeries, { color, lineWidth: title === "50%" ? 2 : 1, lineStyle: title === "50%" ? 2 : 0, title, priceLineVisible: false, lastValueVisible: true });
-      line.setData(horizontalData(candles, crt.rangeTime, value)); holder.crtLines.push(line);
+      line.setData(horizontalData(candles, crt.rangeTime, value));
+      holder.crtLines.push(line);
     }
   }, [candles, crt]);
 
