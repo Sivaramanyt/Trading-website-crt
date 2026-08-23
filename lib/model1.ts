@@ -1,4 +1,5 @@
 import type { Candle } from "./binance";
+import { detectTurtleSoup, type TurtleSoupSetup } from "./turtleSoup";
 
 export type ModelOneSetup = {
   direction: "LONG" | "SHORT";
@@ -11,6 +12,7 @@ export type ModelOneSetup = {
   triggerTime: number;
   confirmationTime: number;
   reason: string;
+  turtleSoup: TurtleSoupSetup | null;
 };
 
 function thickBody(c: Candle): boolean {
@@ -24,16 +26,16 @@ function touchesKey(c: Candle, keyLow: number, keyHigh: number): boolean {
   return c.low <= keyHigh && c.high >= keyLow;
 }
 
+function buildReason(base: string, soup: TurtleSoupSetup | null): string {
+  if (!soup) return base;
+  return `${base} ${soup.kind === "KOD" ? "Kiss of Death Turtle Soup" : "Turtle Soup"} ${soup.status.toLowerCase()} at ${soup.sweepLevel.toLocaleString(undefined, { maximumFractionDigits: 2 })}.`;
+}
+
 /**
  * 15M execution confirmation after a 4H CRT has been validated at a key level.
- *
- * The lower timeframe is only searched from the 4H CRT distribution candle
- * forward, so older 15M patterns cannot create a signal for a newer 4H CRT.
- *
- * Bullish Model #1: a thick down-close candle attacks the bullish key zone,
- * then the next candle closes above the trigger candle.
- * Bearish Model #1: a thick up-close candle attacks the bearish key zone,
- * then the next candle closes below the trigger candle.
+ * The transcript describes the lower-timeframe journey as Turtle Soup -> Model #1
+ * (and later KOD before the CRT target). We expose the latest transcript-grounded
+ * Turtle Soup/KOD observation alongside Model #1.
  */
 export function detectModelOne(
   candles: Candle[],
@@ -41,11 +43,22 @@ export function detectModelOne(
   keyHigh: number,
   direction: "LONG" | "SHORT",
   startTime = 0,
+  rangeLow?: number,
+  rangeHigh?: number,
 ): ModelOneSetup | null {
   const closed = candles
     .filter((c) => c.closed !== false && c.time >= startTime)
     .sort((a, b) => a.time - b.time);
   if (closed.length < 2 || !Number.isFinite(keyLow) || !Number.isFinite(keyHigh)) return null;
+
+  const turtleSoup = detectTurtleSoup(
+    closed,
+    direction,
+    startTime,
+    closed[closed.length - 1].time,
+    rangeLow,
+    rangeHigh,
+  );
 
   for (let i = closed.length - 2; i >= 0; i--) {
     const trigger = closed[i];
@@ -56,6 +69,9 @@ export function detectModelOne(
     if (direction === "LONG") {
       if (trigger.close >= trigger.open) continue;
       const confirmed = confirm.close > trigger.high;
+      const base = confirmed
+        ? "15M Model #1 confirmed: a thick down-close candle mitigated the 4H key level and the next candle closed above the trigger candle."
+        : "15M Model #1 forming: a thick down-close candle mitigated the 4H key level; confirmation requires a close above the trigger candle.";
       return {
         direction,
         status: confirmed ? "CONFIRMED" : "FORMING",
@@ -66,14 +82,16 @@ export function detectModelOne(
         stop: trigger.low,
         triggerTime: trigger.time,
         confirmationTime: confirm.time,
-        reason: confirmed
-          ? "15M Model #1 confirmed: a thick down-close candle mitigated the 4H key level and the next candle closed above the trigger candle."
-          : "15M Model #1 forming: a thick down-close candle mitigated the 4H key level; confirmation requires a close above the trigger candle.",
+        reason: buildReason(base, turtleSoup),
+        turtleSoup,
       };
     }
 
     if (trigger.close <= trigger.open) continue;
     const confirmed = confirm.close < trigger.low;
+    const base = confirmed
+      ? "15M Model #1 confirmed: a thick up-close candle mitigated the 4H key level and the next candle closed below the trigger candle."
+      : "15M Model #1 forming: a thick up-close candle mitigated the 4H key level; confirmation requires a close below the trigger candle.";
     return {
       direction,
       status: confirmed ? "CONFIRMED" : "FORMING",
@@ -84,9 +102,8 @@ export function detectModelOne(
       stop: trigger.high,
       triggerTime: trigger.time,
       confirmationTime: confirm.time,
-      reason: confirmed
-        ? "15M Model #1 confirmed: a thick up-close candle mitigated the 4H key level and the next candle closed below the trigger candle."
-        : "15M Model #1 forming: a thick up-close candle mitigated the 4H key level; confirmation requires a close below the trigger candle.",
+      reason: buildReason(base, turtleSoup),
+      turtleSoup,
     };
   }
 
