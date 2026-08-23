@@ -52,7 +52,6 @@ function parseRows(rows: BinanceKline[]): Candle[] {
     if (!Number.isFinite(openTime) || !Number.isFinite(closeTime)) continue;
 
     byTime.set(Math.floor(openTime / 1000), {
-      // Always use Binance's exchange candle OPEN timestamp.
       time: Math.floor(openTime / 1000),
       open: Number(row[1]),
       high: Number(row[2]),
@@ -98,12 +97,12 @@ export async function getKlines(symbol: string, interval: string, limit = 500): 
   throw new Error(`Binance USDⓈ-M Futures market data unavailable. ${errors.join(" | ")}`);
 }
 
-/**
- * Binance USDⓈ-M Futures last traded price.
- * This is intentionally separate from the kline close so the header quote
- * follows the exchange's latest trade, like the live BTCUSDT.P quote in
- * TradingView, rather than waiting for a candle refresh.
- */
+/** Fast REST catch-up used when a browser WebSocket is delayed or reconnecting. */
+export async function getLatestKlines(symbol: string, interval = "15m"): Promise<Candle[]> {
+  return getKlines(symbol, interval, 3);
+}
+
+/** Binance USDⓈ-M Futures last traded price. */
 export async function getLastPrice(symbol: string): Promise<number> {
   const errors: string[] = [];
 
