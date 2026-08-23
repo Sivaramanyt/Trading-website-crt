@@ -51,9 +51,16 @@ export default function TradingTerminal() {
       if (!chartCandles.length || !htf.length || !ltf.length) throw new Error("Binance Futures returned no candles.");
       setCandles(chartCandles);
       setPrice(lastPrice);
+
       const setup = detectCrt(htf);
       setCrt(setup);
-      setModel1(setup ? detectModelOne(ltf, setup.direction === "LONG" ? setup.rangeLow : setup.rangeHigh, setup.direction) : null);
+
+      // Only move to the 15M execution model after the 4H CRT has been
+      // validated. Use the actual mitigated key-level zone, not the CRT edge.
+      const execution = setup && setup.status === "CONFIRMED" && tf === "15m"
+        ? detectModelOne(ltf, setup.keyLevelLow, setup.keyLevelHigh, setup.direction, setup.distributionTime)
+        : null;
+      setModel1(execution);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Unable to load Binance Futures market data.");
       setStatus("offline");
@@ -96,7 +103,6 @@ export default function TradingTerminal() {
     const connect = () => {
       if (cancelled) return;
       setStatus("connecting");
-
       const ws = new WebSocket(`wss://fstream.binance.com/ws/${symbol.toLowerCase()}@kline_${streamInterval}`);
       wsRef.current = ws;
       ws.onopen = () => { retry = 0; setStatus("live"); };
@@ -106,15 +112,9 @@ export default function TradingTerminal() {
           if (!k) return;
           const openTime = Number(k.t);
           if (!Number.isFinite(openTime)) return;
-          const c: Candle = {
-            time: Math.floor(openTime / 1000),
-            open: Number(k.o), high: Number(k.h), low: Number(k.l), close: Number(k.c),
-            volume: Number(k.v), closed: Boolean(k.x),
-          };
+          const c: Candle = { time: Math.floor(openTime / 1000), open: Number(k.o), high: Number(k.h), low: Number(k.l), close: Number(k.c), volume: Number(k.v), closed: Boolean(k.x) };
           setCandles(old => mergeCandle(old, c));
-        } catch {
-          // Ignore malformed stream messages.
-        }
+        } catch {}
       };
       ws.onerror = () => { setStatus("offline"); ws.close(); };
       ws.onclose = () => {
@@ -131,9 +131,7 @@ export default function TradingTerminal() {
           const data = JSON.parse(e.data);
           const last = Number(data?.p);
           if (Number.isFinite(last)) setPrice(last);
-        } catch {
-          // Ignore malformed stream messages.
-        }
+        } catch {}
       };
       tradeWs.onerror = () => tradeWs.close();
     };
@@ -142,10 +140,8 @@ export default function TradingTerminal() {
     return () => {
       cancelled = true;
       if (reconnectRef.current) window.clearTimeout(reconnectRef.current);
-      wsRef.current?.close();
-      tradeWsRef.current?.close();
-      wsRef.current = null;
-      tradeWsRef.current = null;
+      wsRef.current?.close(); tradeWsRef.current?.close();
+      wsRef.current = null; tradeWsRef.current = null;
     };
   }, [symbol, timeframe]);
 
@@ -157,36 +153,22 @@ export default function TradingTerminal() {
       crosshair: { vertLine: { color: "#465064", labelBackgroundColor: "#1d2635" }, horzLine: { color: "#465064", labelBackgroundColor: "#1d2635" } },
       rightPriceScale: { borderColor: "#202938" },
       timeScale: { borderColor: "#202938", timeVisible: true, secondsVisible: false, rightOffset: 2, barSpacing: 8, minBarSpacing: 2 },
-      width: rootRef.current.clientWidth,
-      height: 620,
+      width: rootRef.current.clientWidth, height: 620,
     });
-
-    const series = chart.addSeries(CandlestickSeries, {
-      upColor: "#19c37d", downColor: "#ef5b6b", borderUpColor: "#19c37d", borderDownColor: "#ef5b6b", wickUpColor: "#19c37d", wickDownColor: "#ef5b6b",
-    });
-
-    chartRef.current = chart;
-    candleRef.current = series;
-
-    const ro = new ResizeObserver(() => {
-      if (rootRef.current) chart.applyOptions({ width: rootRef.current.clientWidth });
-    });
+    const series = chart.addSeries(CandlestickSeries, { upColor: "#19c37d", downColor: "#ef5b6b", borderUpColor: "#19c37d", borderDownColor: "#ef5b6b", wickUpColor: "#19c37d", wickDownColor: "#ef5b6b" });
+    chartRef.current = chart; candleRef.current = series;
+    const ro = new ResizeObserver(() => { if (rootRef.current) chart.applyOptions({ width: rootRef.current.clientWidth }); });
     ro.observe(rootRef.current);
-
     return () => { ro.disconnect(); chart.remove(); chartRef.current = null; candleRef.current = null; };
   }, []);
 
-  // Only fit the chart when the symbol/timeframe changes or the first history arrives.
-  // Live candle updates preserve manual zoom/pan.
   useEffect(() => {
     if (!candleRef.current || !candles.length || !chartRef.current) return;
     candleRef.current.setData(candles.map(c => ({ time: chartTime(c.time), open: c.open, high: c.high, low: c.low, close: c.close })));
-
     const viewKey = `${symbol}:${timeframe}`;
     if (!viewInitializedRef.current || viewResetKeyRef.current !== viewKey) {
       chartRef.current.timeScale().fitContent();
-      viewInitializedRef.current = true;
-      viewResetKeyRef.current = viewKey;
+      viewInitializedRef.current = true; viewResetKeyRef.current = viewKey;
     }
   }, [candles, symbol, timeframe]);
 
@@ -195,18 +177,16 @@ export default function TradingTerminal() {
     const holder = chart as IChartApi & { crtLines?: ISeriesApi<"Line">[] };
     holder.crtLines?.forEach(s => chart.removeSeries(s)); holder.crtLines = [];
     if (!crt) return;
-    const levels = [[crt.rangeHigh, "#55d6be", "CRT HIGH"], [crt.midpoint, "#f5c451", "50%"], [crt.rangeLow, "#55d6be", "CRT LOW"], [crt.entry, "#7c8cff", "ENTRY"], [crt.stop, "#ef5b6b", "SL"]] as const;
+    const levels = [[crt.rangeHigh, "#55d6be", "CRT HIGH"], [crt.midpoint, "#f5c451", "50%"], [crt.rangeLow, "#55d6be", "CRT LOW"], [crt.entry, "#7c8cff", "ENTRY"], [crt.stop, "#ef5b6b", "SL"], [crt.keyLevel, "#a78bfa", crt.keyLevelLabel]] as const;
     for (const [value, color, title] of levels) {
-      const line = chart.addSeries(LineSeries, { color, lineWidth: title === "50%" ? 2 : 1, lineStyle: title === "50%" ? 2 : 0, title, priceLineVisible: false, lastValueVisible: true });
-      line.setData(horizontalData(candles, crt.rangeTime, value));
-      holder.crtLines.push(line);
+      const line = chart.addSeries(LineSeries, { color, lineWidth: title === "50%" ? 2 : 1, lineStyle: title === "50%" ? 2 : 2, title, priceLineVisible: false, lastValueVisible: true });
+      line.setData(horizontalData(candles, crt.rangeTime, value)); holder.crtLines.push(line);
     }
     if (model1 && timeframe === "15m") {
-      const modelLevels = [[model1.keyLevel, "#a78bfa", "MODEL 1 KEY"], [model1.triggerHigh, "#f59e0b", "M1 HIGH"], [model1.triggerLow, "#f59e0b", "M1 LOW"]] as const;
+      const modelLevels = [[model1.keyLevel, "#a78bfa", "15M KEY"], [model1.triggerHigh, "#f59e0b", "M1 HIGH"], [model1.triggerLow, "#f59e0b", "M1 LOW"]] as const;
       for (const [value, color, title] of modelLevels) {
         const line = chart.addSeries(LineSeries, { color, lineWidth: 1, lineStyle: 2, title, priceLineVisible: false, lastValueVisible: true });
-        line.setData(horizontalData(candles, model1.triggerTime, value));
-        holder.crtLines.push(line);
+        line.setData(horizontalData(candles, model1.triggerTime, value)); holder.crtLines.push(line);
       }
     }
   }, [candles, crt, model1, timeframe]);
@@ -221,7 +201,7 @@ export default function TradingTerminal() {
     <section className="workspace">
       <div className="chart-card"><div className="chart-toolbar"><div><span className="toolbar-title">Futures price action</span><span className="toolbar-muted">{timeframe === "15m" ? "15 minute execution chart" : "4 hour higher-timeframe chart"} · USDⓈ-M perpetual market</span></div><div className="toolbar-badges"><span className="badge">HTF: 4H</span><span className="badge">LTF: 15M</span><span className="badge live-badge">LIVE</span></div></div><div className="chart-wrap">{loading && <div className="chart-overlay">Loading Binance Futures {timeframe} candles…</div>}<div ref={rootRef} className="chart" /></div></div>
       <aside className="side-panel"><div className="panel-header"><div><div className="eyebrow">CRT ANALYSIS</div><h2>{crt ? `${crt.direction} SETUP` : "WAITING"}</h2></div><span className={`signal-pill ${crt?.direction?.toLowerCase() ?? "neutral"}`}>{crt?.status ?? "NO SETUP"}</span></div>
-        {crt ? <><div className="setup-banner"><div className="setup-icon">{crt.direction === "LONG" ? "↗" : "↘"}</div><div><strong>{crt.direction === "LONG" ? "Bullish CRT" : "Bearish CRT"}</strong><p>{crt.reason}</p></div></div><div className="levels"><Level label="Entry" value={crt.entry}/><Level label="Stop Loss" value={crt.stop} danger/><Level label="Target 1 · 50%" value={crt.target1}/><Level label="Target 2 · CRT edge" value={crt.target2}/></div><div className="range-card"><div className="range-title">4H CRT RANGE</div><div className="range-row"><span>High</span><b>{formatPrice(crt.rangeHigh)}</b></div><div className="range-mid"><span>50%</span><b>{formatPrice(crt.midpoint)}</b></div><div className="range-row"><span>Low</span><b>{formatPrice(crt.rangeLow)}</b></div></div><div className="model-card"><div className="range-title">15M MODEL #1</div><div className="model-status"><span className={`signal-pill ${model1 ? (model1.direction === "LONG" ? "long" : "short") : "neutral"}`}>{model1?.status ?? "NO CANDIDATE"}</span></div><p>{model1?.reason ?? "No source-qualified Model #1 candidate is currently detected at the provisional CRT boundary key level."}</p>{model1 && <div className="levels"><Level label="Key Level" value={model1.keyLevel}/><Level label="M1 Entry" value={model1.entry}/><Level label="M1 Stop" value={model1.stop} danger/></div>}</div><div className="disclaimer"><b>Strategy engine v0.2</b><span>4H CRT + 15M Model #1 are automated from the supplied transcript rules. Key-level quality beyond the CRT boundary and other discretionary confirmations are not silently guessed.</span></div></> : <div className="empty-state"><div className="empty-icon">⌁</div><h3>No confirmed CRT</h3><p>The latest closed 4H candles do not currently match the foundational sweep-and-return pattern.</p></div>}
+        {crt ? <><div className="setup-banner"><div className="setup-icon">{crt.direction === "LONG" ? "↗" : "↘"}</div><div><strong>{crt.direction === "LONG" ? "Bullish CRT" : "Bearish CRT"}</strong><p>{crt.reason}</p></div></div><div className="levels"><Level label="Entry" value={crt.entry}/><Level label="Stop Loss" value={crt.stop} danger/><Level label="Target 1 · 50%" value={crt.target1}/><Level label="Target 2 · CRT edge" value={crt.target2}/></div><div className="range-card"><div className="range-title">4H CRT RANGE</div><div className="range-row"><span>High</span><b>{formatPrice(crt.rangeHigh)}</b></div><div className="range-mid"><span>50%</span><b>{formatPrice(crt.midpoint)}</b></div><div className="range-row"><span>Low</span><b>{formatPrice(crt.rangeLow)}</b></div></div><div className="model-card"><div className="range-title">4H KEY LEVEL → 15M EXECUTION</div><div className="model-status"><span className={`signal-pill ${model1 ? (model1.direction === "LONG" ? "long" : "short") : "neutral"}`}>{model1?.status ?? "WAITING FOR 15M"}</span></div><p>{crt.keyLevelLabel} is the validated 4H key level. The 15M engine only searches after the 4H CRT distribution candle.</p><div className="levels"><Level label="4H Key Level" value={crt.keyLevel}/>{model1 && <><Level label="M1 Entry" value={model1.entry}/><Level label="M1 Stop" value={model1.stop} danger/></>}</div>{model1 && <p>{model1.reason}</p>}</div><div className="disclaimer"><b>Strategy engine v0.3</b><span>4H CRT key-level mitigation → 15M execution. The lower timeframe does not search before the validated 4H CRT.</span></div></> : <div className="empty-state"><div className="empty-icon">⌁</div><h3>No confirmed CRT</h3><p>The latest closed 4H candles do not currently match the required CRT + key-level structure.</p></div>}
       </aside>
     </section>
     {error && <div className="error-bar">{error}</div>}
