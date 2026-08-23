@@ -19,18 +19,18 @@ const FALLBACK_DATA_APIS = [
 ];
 
 type BinanceKline = [
-  number,  // open time (ms)
-  string,  // open
-  string,  // high
-  string,  // low
-  string,  // close
-  string,  // volume
-  number,  // close time (ms)
-  string,  // quote volume
-  number,  // trades
-  string,  // taker buy base volume
-  string,  // taker buy quote volume
-  string,  // unused
+  number,
+  string,
+  string,
+  string,
+  string,
+  string,
+  number,
+  string,
+  number,
+  string,
+  string,
+  string,
 ];
 
 function makeUrl(host: string, symbol: string, interval: string, limit: number) {
@@ -44,9 +44,6 @@ function makeUrl(host: string, symbol: string, interval: string, limit: number) 
 
 function parseRows(rows: BinanceKline[]): Candle[] {
   const now = Date.now();
-
-  // Binance returns klines in chronological order. Normalize again here so
-  // the chart always receives one candle per exact exchange open timestamp.
   const byTime = new Map<number, Candle>();
 
   for (const row of rows) {
@@ -55,8 +52,7 @@ function parseRows(rows: BinanceKline[]): Candle[] {
     if (!Number.isFinite(openTime) || !Number.isFinite(closeTime)) continue;
 
     byTime.set(Math.floor(openTime / 1000), {
-      // IMPORTANT: use Binance's candle OPEN time as the Lightweight Charts
-      // timestamp. Do not use local/browser time or the candle close time.
+      // Always use Binance's exchange candle OPEN timestamp.
       time: Math.floor(openTime / 1000),
       open: Number(row[1]),
       high: Number(row[2]),
@@ -84,13 +80,7 @@ async function requestKlines(host: string, symbol: string, interval: string, lim
   return parseRows(rows);
 }
 
-/**
- * Public USDⓈ-M Futures klines.
- *
- * Primary source is Binance's canonical fapi.binance.com endpoint. The other
- * Binance Futures API hosts are only fallbacks if the canonical host cannot
- * be reached from the user's network.
- */
+/** Public USDⓈ-M Futures klines. */
 export async function getKlines(symbol: string, interval: string, limit = 500): Promise<Candle[]> {
   const errors: string[] = [];
   const hosts = [PRIMARY_DATA_API, ...FALLBACK_DATA_APIS];
@@ -106,4 +96,32 @@ export async function getKlines(symbol: string, interval: string, limit = 500): 
   }
 
   throw new Error(`Binance USDⓈ-M Futures market data unavailable. ${errors.join(" | ")}`);
+}
+
+/**
+ * Binance USDⓈ-M Futures last traded price.
+ * This is intentionally separate from the kline close so the header quote
+ * follows the exchange's latest trade, like the live BTCUSDT.P quote in
+ * TradingView, rather than waiting for a candle refresh.
+ */
+export async function getLastPrice(symbol: string): Promise<number> {
+  const errors: string[] = [];
+
+  for (const host of [PRIMARY_DATA_API, ...FALLBACK_DATA_APIS]) {
+    try {
+      const response = await fetch(`${host}/fapi/v1/ticker/price?symbol=${encodeURIComponent(symbol.toUpperCase())}`, {
+        cache: "no-store",
+        headers: { Accept: "application/json" },
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = (await response.json()) as { price?: string };
+      const price = Number(data.price);
+      if (Number.isFinite(price)) return price;
+      throw new Error("invalid price");
+    } catch (error) {
+      errors.push(`${host}: ${error instanceof Error ? error.message : "network error"}`);
+    }
+  }
+
+  throw new Error(`Binance Futures last price unavailable. ${errors.join(" | ")}`);
 }
