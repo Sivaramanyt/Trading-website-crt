@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { CandlestickSeries, ColorType, createChart, LineSeries, type IChartApi, type ISeriesApi, type Time } from "lightweight-charts";
-import { getKlines, type Candle } from "@/lib/binance";
+import { getKlines, getLastPrice, type Candle } from "@/lib/binance";
 import { detectCrt, formatPrice, type CrtSetup } from "@/lib/crt";
 
 const SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT"];
@@ -23,6 +23,7 @@ export default function TradingTerminal() {
   const chartRef = useRef<IChartApi | null>(null);
   const candleRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const tradeWsRef = useRef<WebSocket | null>(null);
   const [symbol, setSymbol] = useState("BTCUSDT");
   const [candles, setCandles] = useState<Candle[]>([]);
   const [crt, setCrt] = useState<CrtSetup | null>(null);
@@ -34,16 +35,17 @@ export default function TradingTerminal() {
   const load = useCallback(async (s: string) => {
     setLoading(true); setError("");
     try {
-      // Both series come from Binance USDⓈ-M Futures. The 15m series is the
-      // exact exchange kline used for the execution chart; the 4h series is
-      // used independently by the CRT engine.
-      const [ltf, htf] = await Promise.all([
+      // Historical candles and the live quote are deliberately separate:
+      // klines reproduce the chart, while ticker/price supplies the latest
+      // Futures last-traded price for the header quote.
+      const [ltf, htf, lastPrice] = await Promise.all([
         getKlines(s, "15m", 500),
         getKlines(s, "4h", 200),
+        getLastPrice(s),
       ]);
       if (!ltf.length || !htf.length) throw new Error("Binance Futures returned no candles.");
       setCandles(ltf);
-      setPrice(ltf.at(-1)?.close ?? null);
+      setPrice(lastPrice);
       setCrt(detectCrt(htf));
       setError("");
     } catch (e) {
@@ -59,10 +61,12 @@ export default function TradingTerminal() {
   }, [load, symbol]);
 
   useEffect(() => {
-    wsRef.current?.close(); setStatus("connecting");
+    wsRef.current?.close();
+    tradeWsRef.current?.close();
+    setStatus("connecting");
 
-    // Binance USDⓈ-M Futures 15m kline stream. Its k.t field is the same
-    // exchange candle OPEN timestamp used by the REST klines above.
+    // Binance USDⓈ-M Futures 15m kline stream. k.t is the exchange candle
+    // OPEN timestamp, matching the REST kline timestamp exactly.
     const ws = new WebSocket(`wss://fstream.binance.com/ws/${symbol.toLowerCase()}@kline_15m`);
     wsRef.current = ws;
     ws.onopen = () => setStatus("live");
@@ -83,7 +87,6 @@ export default function TradingTerminal() {
           closed: Boolean(k.x),
         };
 
-        setPrice(c.close);
         setCandles(old => mergeCandle(old, c));
       } catch {
         // Ignore malformed stream messages.
@@ -91,7 +94,28 @@ export default function TradingTerminal() {
     };
     ws.onerror = () => setStatus("offline");
     ws.onclose = () => setStatus("offline");
-    return () => { ws.close(); wsRef.current = null; };
+
+    // The TradingView-style quote should follow the Futures LAST TRADE, not
+    // a cached candle close. aggTrade gives the exchange's latest aggregated
+    // trade price and updates independently of the 15m candle lifecycle.
+    const tradeWs = new WebSocket(`wss://fstream.binance.com/ws/${symbol.toLowerCase()}@aggTrade`);
+    tradeWsRef.current = tradeWs;
+    tradeWs.onmessage = e => {
+      try {
+        const data = JSON.parse(e.data);
+        const last = Number(data?.p);
+        if (Number.isFinite(last)) setPrice(last);
+      } catch {
+        // Ignore malformed stream messages.
+      }
+    };
+
+    return () => {
+      ws.close();
+      tradeWs.close();
+      wsRef.current = null;
+      tradeWsRef.current = null;
+    };
   }, [symbol]);
 
   useEffect(() => {
@@ -169,7 +193,7 @@ export default function TradingTerminal() {
       <div className="market-picker"><label htmlFor="symbol">Futures Market</label><select id="symbol" value={symbol} onChange={e => setSymbol(e.target.value)}>{SYMBOLS.map(s => <option key={s}>{s}</option>)}</select></div>
       <div className="connection"><span className={`status-dot ${status}`} />{status === "live" ? "BINANCE FUTURES LIVE" : status === "connecting" ? "CONNECTING" : "OFFLINE"}</div>
     </header>
-    <section className="market-strip"><div><div className="eyebrow">BINANCE USDⓈ-M FUTURES</div><h1>{symbol}</h1></div><div className="quote-block"><div className="price">{price == null ? "—" : formatPrice(price)}</div><div className="quote-note">15m real-time futures candle stream</div></div><div className="tf-stack"><span className="tf active">15m</span><span className="tf">HTF 4h</span></div></section>
+    <section className="market-strip"><div><div className="eyebrow">BINANCE USDⓈ-M FUTURES</div><h1>{symbol}</h1></div><div className="quote-block"><div className="price">{price == null ? "—" : formatPrice(price)}</div><div className="quote-note">15m real-time futures candle stream · last trade</div></div><div className="tf-stack"><span className="tf active">15m</span><span className="tf">HTF 4h</span></div></section>
     <section className="workspace">
       <div className="chart-card"><div className="chart-toolbar"><div><span className="toolbar-title">Futures price action</span><span className="toolbar-muted">15 minute execution chart · USDⓈ-M perpetual market</span></div><div className="toolbar-badges"><span className="badge">HTF: 4H</span><span className="badge">LTF: 15M</span><span className="badge live-badge">LIVE</span></div></div><div className="chart-wrap">{loading && <div className="chart-overlay">Loading Binance Futures candles…</div>}<div ref={rootRef} className="chart" /></div></div>
       <aside className="side-panel"><div className="panel-header"><div><div className="eyebrow">CRT ANALYSIS</div><h2>{crt ? `${crt.direction} SETUP` : "WAITING"}</h2></div><span className={`signal-pill ${crt?.direction?.toLowerCase() ?? "neutral"}`}>{crt?.status ?? "NO SETUP"}</span></div>
