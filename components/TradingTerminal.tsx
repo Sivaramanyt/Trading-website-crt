@@ -6,6 +6,7 @@ import { getKlines, getLatestKlines, getLastPrice, type Candle } from "@/lib/bin
 import { detectCrt, formatPrice, type CrtSetup } from "@/lib/crt";
 
 const SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT"];
+type ChartTimeframe = "15m" | "4h";
 const chartTime = (n: number) => n as Time;
 
 function horizontalData(candles: Candle[], from: number, value: number) {
@@ -26,6 +27,7 @@ export default function TradingTerminal() {
   const tradeWsRef = useRef<WebSocket | null>(null);
   const reconnectRef = useRef<number | null>(null);
   const [symbol, setSymbol] = useState("BTCUSDT");
+  const [timeframe, setTimeframe] = useState<ChartTimeframe>("15m");
   const [candles, setCandles] = useState<Candle[]>([]);
   const [crt, setCrt] = useState<CrtSetup | null>(null);
   const [price, setPrice] = useState<number | null>(null);
@@ -33,16 +35,16 @@ export default function TradingTerminal() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
-  const load = useCallback(async (s: string) => {
+  const load = useCallback(async (s: string, tf: ChartTimeframe) => {
     setLoading(true); setError("");
     try {
-      const [ltf, htf, lastPrice] = await Promise.all([
-        getKlines(s, "15m", 500),
+      const [chartCandles, htf, lastPrice] = await Promise.all([
+        getKlines(s, tf, tf === "15m" ? 500 : 200),
         getKlines(s, "4h", 200),
         getLastPrice(s),
       ]);
-      if (!ltf.length || !htf.length) throw new Error("Binance Futures returned no candles.");
-      setCandles(ltf);
+      if (!chartCandles.length || !htf.length) throw new Error("Binance Futures returned no candles.");
+      setCandles(chartCandles);
       setPrice(lastPrice);
       setCrt(detectCrt(htf));
     } catch (e) {
@@ -51,23 +53,25 @@ export default function TradingTerminal() {
     } finally { setLoading(false); }
   }, []);
 
-  // Full history/HTF refresh once a minute. The much faster 5-second sync below
-  // keeps the active 15m candle caught up even if the browser WebSocket stalls.
+  // Full history/HTF refresh once a minute. The faster sync below keeps the
+  // active candle caught up for whichever timeframe is currently displayed.
   useEffect(() => {
-    void load(symbol);
-    const id = window.setInterval(() => void load(symbol), 60_000);
+    void load(symbol, timeframe);
+    const id = window.setInterval(() => void load(symbol, timeframe), 60_000);
     return () => window.clearInterval(id);
-  }, [load, symbol]);
+  }, [load, symbol, timeframe]);
 
   useEffect(() => {
     let cancelled = false;
 
     const syncLatest = async () => {
       try {
-        const latest = await getLatestKlines(symbol, "15m");
+        const latest = await getLatestKlines(symbol, timeframe);
         if (!cancelled && latest.length) {
           setCandles(old => latest.reduce(mergeCandle, old));
-          setPrice(latest[latest.length - 1].close);
+          // Keep the quote sourced from the Futures last-trade stream/endpoint;
+          // the candle close is not used as the live quote here.
+          if (timeframe === "15m") setPrice(latest[latest.length - 1].close);
           setError("");
         }
       } catch {
@@ -78,7 +82,7 @@ export default function TradingTerminal() {
     void syncLatest();
     const id = window.setInterval(() => void syncLatest(), 5_000);
     return () => { cancelled = true; window.clearInterval(id); };
-  }, [symbol]);
+  }, [symbol, timeframe]);
 
   useEffect(() => {
     wsRef.current?.close();
@@ -87,12 +91,13 @@ export default function TradingTerminal() {
 
     let cancelled = false;
     let retry = 0;
+    const streamInterval = timeframe;
 
     const connect = () => {
       if (cancelled) return;
       setStatus("connecting");
 
-      const ws = new WebSocket(`wss://fstream.binance.com/ws/${symbol.toLowerCase()}@kline_15m`);
+      const ws = new WebSocket(`wss://fstream.binance.com/ws/${symbol.toLowerCase()}@kline_${streamInterval}`);
       wsRef.current = ws;
       ws.onopen = () => { retry = 0; setStatus("live"); };
       ws.onmessage = e => {
@@ -111,7 +116,6 @@ export default function TradingTerminal() {
             closed: Boolean(k.x),
           };
           setCandles(old => mergeCandle(old, c));
-          setPrice(c.close);
         } catch {
           // Ignore malformed stream messages.
         }
@@ -124,6 +128,8 @@ export default function TradingTerminal() {
         reconnectRef.current = window.setTimeout(connect, delay);
       };
 
+      // The quote stream is independent from the selected chart timeframe.
+      // It keeps the displayed last-trade price responsive on both 15m and 4h.
       const tradeWs = new WebSocket(`wss://fstream.binance.com/ws/${symbol.toLowerCase()}@aggTrade`);
       tradeWsRef.current = tradeWs;
       tradeWs.onmessage = e => {
@@ -136,10 +142,6 @@ export default function TradingTerminal() {
         }
       };
       tradeWs.onerror = () => tradeWs.close();
-      tradeWs.onclose = () => {
-        // The 5-second kline REST sync still keeps the chart current if the
-        // trade quote socket is unavailable.
-      };
     };
 
     connect();
@@ -151,7 +153,7 @@ export default function TradingTerminal() {
       wsRef.current = null;
       tradeWsRef.current = null;
     };
-  }, [symbol]);
+  }, [symbol, timeframe]);
 
   useEffect(() => {
     if (!rootRef.current) return;
@@ -197,7 +199,7 @@ export default function TradingTerminal() {
       line.setData(horizontalData(candles, crt.rangeTime, value));
       holder.crtLines.push(line);
     }
-  }, [candles, crt]);
+  }, [candles, crt, timeframe]);
 
   return <main className="terminal-shell">
     <header className="topbar">
@@ -205,9 +207,9 @@ export default function TradingTerminal() {
       <div className="market-picker"><label htmlFor="symbol">Futures Market</label><select id="symbol" value={symbol} onChange={e => setSymbol(e.target.value)}>{SYMBOLS.map(s => <option key={s}>{s}</option>)}</select></div>
       <div className="connection"><span className={`status-dot ${status}`} />{status === "live" ? "BINANCE FUTURES LIVE" : status === "connecting" ? "CONNECTING" : "OFFLINE"}</div>
     </header>
-    <section className="market-strip"><div><div className="eyebrow">BINANCE USDⓈ-M FUTURES</div><h1>{symbol}</h1></div><div className="quote-block"><div className="price">{price == null ? "—" : formatPrice(price)}</div><div className="quote-note">15m real-time futures candle stream · last trade</div></div><div className="tf-stack"><span className="tf active">15m</span><span className="tf">HTF 4h</span></div></section>
+    <section className="market-strip"><div><div className="eyebrow">BINANCE USDⓈ-M FUTURES</div><h1>{symbol}</h1></div><div className="quote-block"><div className="price">{price == null ? "—" : formatPrice(price)}</div><div className="quote-note">{timeframe} real-time futures candle stream · last trade</div></div><div className="tf-stack"><button type="button" className={`tf ${timeframe === "15m" ? "active" : ""}`} onClick={() => setTimeframe("15m")}>15m</button><button type="button" className={`tf ${timeframe === "4h" ? "active" : ""}`} onClick={() => setTimeframe("4h")}>HTF 4h</button></div></section>
     <section className="workspace">
-      <div className="chart-card"><div className="chart-toolbar"><div><span className="toolbar-title">Futures price action</span><span className="toolbar-muted">15 minute execution chart · USDⓈ-M perpetual market</span></div><div className="toolbar-badges"><span className="badge">HTF: 4H</span><span className="badge">LTF: 15M</span><span className="badge live-badge">LIVE</span></div></div><div className="chart-wrap">{loading && <div className="chart-overlay">Loading Binance Futures candles…</div>}<div ref={rootRef} className="chart" /></div></div>
+      <div className="chart-card"><div className="chart-toolbar"><div><span className="toolbar-title">Futures price action</span><span className="toolbar-muted">{timeframe === "15m" ? "15 minute execution chart" : "4 hour higher-timeframe chart"} · USDⓈ-M perpetual market</span></div><div className="toolbar-badges"><span className="badge">HTF: 4H</span><span className="badge">LTF: 15M</span><span className="badge live-badge">LIVE</span></div></div><div className="chart-wrap">{loading && <div className="chart-overlay">Loading Binance Futures {timeframe} candles…</div>}<div ref={rootRef} className="chart" /></div></div>
       <aside className="side-panel"><div className="panel-header"><div><div className="eyebrow">CRT ANALYSIS</div><h2>{crt ? `${crt.direction} SETUP` : "WAITING"}</h2></div><span className={`signal-pill ${crt?.direction?.toLowerCase() ?? "neutral"}`}>{crt?.status ?? "NO SETUP"}</span></div>
         {crt ? <><div className="setup-banner"><div className="setup-icon">{crt.direction === "LONG" ? "↗" : "↘"}</div><div><strong>{crt.direction === "LONG" ? "Bullish CRT" : "Bearish CRT"}</strong><p>{crt.reason}</p></div></div><div className="levels"><Level label="Entry" value={crt.entry}/><Level label="Stop Loss" value={crt.stop} danger/><Level label="Target 1 · 50%" value={crt.target1}/><Level label="Target 2 · CRT edge" value={crt.target2}/></div><div className="range-card"><div className="range-title">4H CRT RANGE</div><div className="range-row"><span>High</span><b>{formatPrice(crt.rangeHigh)}</b></div><div className="range-mid"><span>50%</span><b>{formatPrice(crt.midpoint)}</b></div><div className="range-row"><span>Low</span><b>{formatPrice(crt.rangeLow)}</b></div></div><div className="disclaimer"><b>Strategy engine v0.1</b><span>Core Candle 1 → sweep → Candle 3 return model is automated. Key-level quality, SMT and full Model #1 confirmation are not auto-approved yet.</span></div></> : <div className="empty-state"><div className="empty-icon">⌁</div><h3>No confirmed CRT</h3><p>The latest closed 4H candles do not currently match the foundational sweep-and-return pattern.</p></div>}
       </aside>
