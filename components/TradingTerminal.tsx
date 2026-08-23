@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { CandlestickSeries, ColorType, createChart, LineSeries, type IChartApi, type ISeriesApi, type Time } from "lightweight-charts";
-import { getKlines, getLastPrice, type Candle } from "@/lib/binance";
+import { getKlines, getLatestKlines, getLastPrice, type Candle } from "@/lib/binance";
 import { detectCrt, formatPrice, type CrtSetup } from "@/lib/crt";
 
 const SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT"];
@@ -24,6 +24,7 @@ export default function TradingTerminal() {
   const candleRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const tradeWsRef = useRef<WebSocket | null>(null);
+  const reconnectRef = useRef<number | null>(null);
   const [symbol, setSymbol] = useState("BTCUSDT");
   const [candles, setCandles] = useState<Candle[]>([]);
   const [crt, setCrt] = useState<CrtSetup | null>(null);
@@ -35,9 +36,6 @@ export default function TradingTerminal() {
   const load = useCallback(async (s: string) => {
     setLoading(true); setError("");
     try {
-      // Historical candles and the live quote are deliberately separate:
-      // klines reproduce the chart, while ticker/price supplies the latest
-      // Futures last-traded price for the header quote.
       const [ltf, htf, lastPrice] = await Promise.all([
         getKlines(s, "15m", 500),
         getKlines(s, "4h", 200),
@@ -47,13 +45,14 @@ export default function TradingTerminal() {
       setCandles(ltf);
       setPrice(lastPrice);
       setCrt(detectCrt(htf));
-      setError("");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Unable to load Binance Futures market data.");
       setStatus("offline");
     } finally { setLoading(false); }
   }, []);
 
+  // Full history/HTF refresh once a minute. The much faster 5-second sync below
+  // keeps the active 15m candle caught up even if the browser WebSocket stalls.
   useEffect(() => {
     void load(symbol);
     const id = window.setInterval(() => void load(symbol), 60_000);
@@ -61,58 +60,94 @@ export default function TradingTerminal() {
   }, [load, symbol]);
 
   useEffect(() => {
+    let cancelled = false;
+
+    const syncLatest = async () => {
+      try {
+        const latest = await getLatestKlines(symbol, "15m");
+        if (!cancelled && latest.length) {
+          setCandles(old => latest.reduce(mergeCandle, old));
+          setPrice(latest[latest.length - 1].close);
+          setError("");
+        }
+      } catch {
+        // WebSocket remains the primary live path; REST is only a catch-up path.
+      }
+    };
+
+    void syncLatest();
+    const id = window.setInterval(() => void syncLatest(), 5_000);
+    return () => { cancelled = true; window.clearInterval(id); };
+  }, [symbol]);
+
+  useEffect(() => {
     wsRef.current?.close();
     tradeWsRef.current?.close();
-    setStatus("connecting");
+    if (reconnectRef.current) window.clearTimeout(reconnectRef.current);
 
-    // Binance USDⓈ-M Futures 15m kline stream. k.t is the exchange candle
-    // OPEN timestamp, matching the REST kline timestamp exactly.
-    const ws = new WebSocket(`wss://fstream.binance.com/ws/${symbol.toLowerCase()}@kline_15m`);
-    wsRef.current = ws;
-    ws.onopen = () => setStatus("live");
-    ws.onmessage = e => {
-      try {
-        const k = JSON.parse(e.data)?.k;
-        if (!k) return;
-        const openTime = Number(k.t);
-        if (!Number.isFinite(openTime)) return;
+    let cancelled = false;
+    let retry = 0;
 
-        const c: Candle = {
-          time: Math.floor(openTime / 1000),
-          open: Number(k.o),
-          high: Number(k.h),
-          low: Number(k.l),
-          close: Number(k.c),
-          volume: Number(k.v),
-          closed: Boolean(k.x),
-        };
+    const connect = () => {
+      if (cancelled) return;
+      setStatus("connecting");
 
-        setCandles(old => mergeCandle(old, c));
-      } catch {
-        // Ignore malformed stream messages.
-      }
+      const ws = new WebSocket(`wss://fstream.binance.com/ws/${symbol.toLowerCase()}@kline_15m`);
+      wsRef.current = ws;
+      ws.onopen = () => { retry = 0; setStatus("live"); };
+      ws.onmessage = e => {
+        try {
+          const k = JSON.parse(e.data)?.k;
+          if (!k) return;
+          const openTime = Number(k.t);
+          if (!Number.isFinite(openTime)) return;
+          const c: Candle = {
+            time: Math.floor(openTime / 1000),
+            open: Number(k.o),
+            high: Number(k.h),
+            low: Number(k.l),
+            close: Number(k.c),
+            volume: Number(k.v),
+            closed: Boolean(k.x),
+          };
+          setCandles(old => mergeCandle(old, c));
+          setPrice(c.close);
+        } catch {
+          // Ignore malformed stream messages.
+        }
+      };
+      ws.onerror = () => { setStatus("offline"); ws.close(); };
+      ws.onclose = () => {
+        if (cancelled) return;
+        setStatus("offline");
+        const delay = Math.min(1_000 * Math.pow(2, retry++), 15_000);
+        reconnectRef.current = window.setTimeout(connect, delay);
+      };
+
+      const tradeWs = new WebSocket(`wss://fstream.binance.com/ws/${symbol.toLowerCase()}@aggTrade`);
+      tradeWsRef.current = tradeWs;
+      tradeWs.onmessage = e => {
+        try {
+          const data = JSON.parse(e.data);
+          const last = Number(data?.p);
+          if (Number.isFinite(last)) setPrice(last);
+        } catch {
+          // Ignore malformed stream messages.
+        }
+      };
+      tradeWs.onerror = () => tradeWs.close();
+      tradeWs.onclose = () => {
+        // The 5-second kline REST sync still keeps the chart current if the
+        // trade quote socket is unavailable.
+      };
     };
-    ws.onerror = () => setStatus("offline");
-    ws.onclose = () => setStatus("offline");
 
-    // The TradingView-style quote should follow the Futures LAST TRADE, not
-    // a cached candle close. aggTrade gives the exchange's latest aggregated
-    // trade price and updates independently of the 15m candle lifecycle.
-    const tradeWs = new WebSocket(`wss://fstream.binance.com/ws/${symbol.toLowerCase()}@aggTrade`);
-    tradeWsRef.current = tradeWs;
-    tradeWs.onmessage = e => {
-      try {
-        const data = JSON.parse(e.data);
-        const last = Number(data?.p);
-        if (Number.isFinite(last)) setPrice(last);
-      } catch {
-        // Ignore malformed stream messages.
-      }
-    };
-
+    connect();
     return () => {
-      ws.close();
-      tradeWs.close();
+      cancelled = true;
+      if (reconnectRef.current) window.clearTimeout(reconnectRef.current);
+      wsRef.current?.close();
+      tradeWsRef.current?.close();
       wsRef.current = null;
       tradeWsRef.current = null;
     };
@@ -125,25 +160,13 @@ export default function TradingTerminal() {
       grid: { vertLines: { color: "#151b25" }, horzLines: { color: "#151b25" } },
       crosshair: { vertLine: { color: "#465064", labelBackgroundColor: "#1d2635" }, horzLine: { color: "#465064", labelBackgroundColor: "#1d2635" } },
       rightPriceScale: { borderColor: "#202938" },
-      timeScale: {
-        borderColor: "#202938",
-        timeVisible: true,
-        secondsVisible: false,
-        rightOffset: 8,
-        barSpacing: 8,
-        minBarSpacing: 2,
-      },
+      timeScale: { borderColor: "#202938", timeVisible: true, secondsVisible: false, rightOffset: 2, barSpacing: 8, minBarSpacing: 2 },
       width: rootRef.current.clientWidth,
       height: 620,
     });
 
     const series = chart.addSeries(CandlestickSeries, {
-      upColor: "#19c37d",
-      downColor: "#ef5b6b",
-      borderUpColor: "#19c37d",
-      borderDownColor: "#ef5b6b",
-      wickUpColor: "#19c37d",
-      wickDownColor: "#ef5b6b",
+      upColor: "#19c37d", downColor: "#ef5b6b", borderUpColor: "#19c37d", borderDownColor: "#ef5b6b", wickUpColor: "#19c37d", wickDownColor: "#ef5b6b",
     });
 
     chartRef.current = chart;
@@ -154,23 +177,12 @@ export default function TradingTerminal() {
     });
     ro.observe(rootRef.current);
 
-    return () => {
-      ro.disconnect();
-      chart.remove();
-      chartRef.current = null;
-      candleRef.current = null;
-    };
+    return () => { ro.disconnect(); chart.remove(); chartRef.current = null; candleRef.current = null; };
   }, []);
 
   useEffect(() => {
     if (!candleRef.current || !candles.length) return;
-    candleRef.current.setData(candles.map(c => ({
-      time: chartTime(c.time),
-      open: c.open,
-      high: c.high,
-      low: c.low,
-      close: c.close,
-    })));
+    candleRef.current.setData(candles.map(c => ({ time: chartTime(c.time), open: c.open, high: c.high, low: c.low, close: c.close })));
     chartRef.current?.timeScale().fitContent();
   }, [candles]);
 
