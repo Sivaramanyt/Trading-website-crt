@@ -23,7 +23,8 @@ h1, h2, h3, p { margin: 0; }
 .price { font-size: 23px; font-weight: 800; letter-spacing: -.03em; }
 .quote-note { color: #68758a; font-size: 11px; margin-top: 4px; }
 .tf-stack { display: flex; gap: 6px; }
-.tf, .badge { padding: 7px 9px; border: 1px solid #273142; border-radius: 7px; color: #7e8a9f; font-size: 10px; font-weight: 800; letter-spacing: .06em; }
+.tf, .badge { padding: 7px 9px; border: 1px solid #273142; border-radius: 7px; color: #7e8a9f; font-size: 10px; font-weight: 800; letter-spacing: .06em; background: transparent; cursor: pointer; transition: border-color .15s ease, background .15s ease, color .15s ease; }
+.tf:hover { color: #c8d1de; border-color: #3a465b; }
 .tf.active { color: #bfeee5; border-color: #2c7467; background: rgba(84,214,189,.08); }
 .workspace { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 14px; padding: 14px 20px 22px; max-width: 1800px; margin: auto; }
 .chart-card, .side-panel { border: 1px solid #1b2330; background: rgba(8,11,18,.88); border-radius: 14px; overflow: hidden; box-shadow: 0 18px 50px rgba(0,0,0,.18); }
@@ -31,7 +32,7 @@ h1, h2, h3, p { margin: 0; }
 .toolbar-title { font-size: 12px; font-weight: 800; margin-right: 10px; }
 .toolbar-muted { color: #697589; font-size: 11px; }
 .toolbar-badges { display: flex; gap: 6px; }
-.badge { padding: 5px 7px; font-size: 9px; }
+.badge { padding: 5px 7px; font-size: 9px; cursor: default; }
 .live-badge { color: #8ee7c9; border-color: #28604f; }
 .chart-wrap { position: relative; height: 620px; }
 .chart { height: 620px; width: 100%; }
